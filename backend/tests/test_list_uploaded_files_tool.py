@@ -978,7 +978,7 @@ class TestToolSchema:
     def test_runtime_excluded_from_model_facing_args(self):
         from deerflow.tools.builtins.list_uploaded_files_tool import list_uploaded_files
 
-        assert set(list_uploaded_files.args) == {"include_outline", "max_results", "query", "extensions"}
+        assert set(list_uploaded_files.args) == {"include_outline", "max_results", "query", "extensions", "cursor"}
         assert "runtime" not in list_uploaded_files.args
 
     def test_openai_schema_generation_succeeds(self):
@@ -989,4 +989,255 @@ class TestToolSchema:
         # This raised PydanticInvalidForJsonSchema before the fix.
         oai = convert_to_openai_tool(list_uploaded_files)
         params = oai["function"]["parameters"]["properties"]
-        assert set(params) == {"include_outline", "max_results", "query", "extensions"}
+        assert set(params) == {"include_outline", "max_results", "query", "extensions", "cursor"}
+
+
+# ---------------------------------------------------------------------------
+# cursor / next_cursor pagination (#5558)
+# ---------------------------------------------------------------------------
+class TestCursorPagination:
+    def _seed_files(self, uploads_dir: Path, count: int, *, mtime_start: int = 1000) -> None:
+        for i in range(count):
+            p = uploads_dir / f"file_{i:03}.txt"
+            p.write_text(f"content {i}", encoding="utf-8")
+            os.utime(p, (mtime_start + i, mtime_start + i))
+
+    def test_pages_without_duplicates_or_omissions(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        self._seed_files(uploads_dir, 250)
+
+        page1 = _list_uploaded_files_impl(max_results=100, runtime=_runtime(), _paths=_paths(tmp_path))
+        assert len(page1["files"]) == 100
+        assert page1["total_count"] == 250
+        assert page1["truncated"] is True
+        assert "next_cursor" in page1
+
+        page2 = _list_uploaded_files_impl(
+            max_results=100,
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            cursor=page1["next_cursor"],
+        )
+        assert len(page2["files"]) == 100
+        assert page2["total_count"] == 250
+        assert "next_cursor" in page2
+
+        page3 = _list_uploaded_files_impl(
+            max_results=100,
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            cursor=page2["next_cursor"],
+        )
+        assert len(page3["files"]) == 50
+        assert page3["total_count"] == 250
+        assert "next_cursor" not in page3
+        assert "truncated" not in page3
+
+        names = [f["filename"] for f in page1["files"] + page2["files"] + page3["files"]]
+        assert len(names) == len(set(names)) == 250
+        # mtime descending: file_249 first, file_000 last
+        assert names[0] == "file_249.txt"
+        assert names[-1] == "file_000.txt"
+
+    def test_equal_mtimes_use_filename_tiebreaker_and_replay_is_stable(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        for name in ("b.txt", "a.txt", "c.txt"):
+            p = uploads_dir / name
+            p.write_text(name, encoding="utf-8")
+            os.utime(p, (500, 500))
+
+        page1 = _list_uploaded_files_impl(max_results=2, runtime=_runtime(), _paths=_paths(tmp_path))
+        assert [f["filename"] for f in page1["files"]] == ["a.txt", "b.txt"]
+        assert "next_cursor" in page1
+
+        replay = _list_uploaded_files_impl(
+            max_results=2,
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            cursor=page1["next_cursor"],
+        )
+        assert [f["filename"] for f in replay["files"]] == ["c.txt"]
+        assert "next_cursor" not in replay
+
+        first_again = _list_uploaded_files_impl(max_results=2, runtime=_runtime(), _paths=_paths(tmp_path))
+        assert [f["filename"] for f in first_again["files"]] == ["a.txt", "b.txt"]
+
+    def test_filters_apply_to_every_page(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        for i in range(6):
+            p = uploads_dir / f"report_{i}.pdf"
+            p.write_bytes(b"%PDF")
+            os.utime(p, (2000 + i, 2000 + i))
+            t = uploads_dir / f"notes_{i}.txt"
+            t.write_text("n", encoding="utf-8")
+            os.utime(t, (3000 + i, 3000 + i))
+
+        page1 = _list_uploaded_files_impl(
+            max_results=2,
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            extensions=["pdf"],
+        )
+        assert [f["filename"] for f in page1["files"]] == ["report_5.pdf", "report_4.pdf"]
+        assert page1["total_count"] == 6
+        assert "next_cursor" in page1
+
+        page2 = _list_uploaded_files_impl(
+            max_results=2,
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            extensions=["pdf"],
+            cursor=page1["next_cursor"],
+        )
+        assert [f["filename"] for f in page2["files"]] == ["report_3.pdf", "report_2.pdf"]
+
+        # Same cursor with different filters must be rejected.
+        rejected = _list_uploaded_files_impl(
+            max_results=2,
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            extensions=["txt"],
+            cursor=page1["next_cursor"],
+        )
+        assert rejected["cursor_invalid"] is True
+        assert rejected["files"] == []
+        assert "Restart without a cursor" in rejected["message"]
+
+    def test_cursor_bound_to_thread(self, tmp_path):
+        uploads_dir_a = _uploads_dir(tmp_path, thread_id="thread-a")
+        uploads_dir_b = _uploads_dir(tmp_path, thread_id="thread-b")
+        for i in range(3):
+            (uploads_dir_a / f"a_{i}.txt").write_text("a", encoding="utf-8")
+            (uploads_dir_b / f"b_{i}.txt").write_text("b", encoding="utf-8")
+
+        page_a = _list_uploaded_files_impl(
+            max_results=1,
+            runtime=_runtime(thread_id="thread-a"),
+            _paths=_paths(tmp_path),
+        )
+        assert "next_cursor" in page_a
+
+        rejected = _list_uploaded_files_impl(
+            max_results=1,
+            runtime=_runtime(thread_id="thread-b"),
+            _paths=_paths(tmp_path),
+            cursor=page_a["next_cursor"],
+        )
+        assert rejected["cursor_invalid"] is True
+        assert rejected["files"] == []
+
+    def test_listing_change_invalidates_cursor(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        self._seed_files(uploads_dir, 5)
+
+        page1 = _list_uploaded_files_impl(max_results=2, runtime=_runtime(), _paths=_paths(tmp_path))
+        assert "next_cursor" in page1
+
+        (uploads_dir / "file_000.txt").unlink()
+        rejected = _list_uploaded_files_impl(
+            max_results=2,
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            cursor=page1["next_cursor"],
+        )
+        assert rejected["cursor_invalid"] is True
+        assert "Restart without a cursor" in rejected["message"]
+
+    def test_empty_directory_invalidates_cursor(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        self._seed_files(uploads_dir, 4)
+        page1 = _list_uploaded_files_impl(max_results=2, runtime=_runtime(), _paths=_paths(tmp_path))
+        assert "next_cursor" in page1
+
+        for p in uploads_dir.iterdir():
+            p.unlink()
+        rejected = _list_uploaded_files_impl(
+            max_results=2,
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            cursor=page1["next_cursor"],
+        )
+        assert rejected["cursor_invalid"] is True
+
+    def test_missing_directory_invalidates_cursor(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        self._seed_files(uploads_dir, 3)
+        page1 = _list_uploaded_files_impl(max_results=1, runtime=_runtime(), _paths=_paths(tmp_path))
+        assert "next_cursor" in page1
+
+        for p in list(uploads_dir.iterdir()):
+            p.unlink()
+        uploads_dir.rmdir()
+
+        rejected = _list_uploaded_files_impl(
+            max_results=1,
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            cursor=page1["next_cursor"],
+        )
+        assert rejected["cursor_invalid"] is True
+        assert "Restart without a cursor" in rejected["message"]
+
+    def test_malformed_and_oversized_cursors_are_controlled_errors(self, tmp_path):
+        _uploads_dir(tmp_path)
+
+        malformed = _list_uploaded_files_impl(
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            cursor="not-a-valid-cursor!!!",
+        )
+        assert malformed["cursor_invalid"] is True
+        assert malformed["files"] == []
+        assert "Restart without a cursor" in malformed["message"]
+        assert str(tmp_path) not in malformed["message"]
+        assert "thread-abc" not in malformed["message"]
+
+        oversized = _list_uploaded_files_impl(
+            runtime=_runtime(),
+            _paths=_paths(tmp_path),
+            cursor="A" * 5000,
+        )
+        assert oversized["cursor_invalid"] is True
+        assert oversized["files"] == []
+        assert str(tmp_path) not in oversized["message"]
+        assert "thread-abc" not in oversized["message"]
+
+    def test_default_call_without_cursor_is_unchanged(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "one.txt").write_text("1", encoding="utf-8")
+        (uploads_dir / "two.txt").write_text("2", encoding="utf-8")
+
+        result = _list_uploaded_files_impl(runtime=_runtime(), _paths=_paths(tmp_path))
+        assert len(result["files"]) == 2
+        assert result["total_count"] == 2
+        assert "next_cursor" not in result
+        assert "truncated" not in result
+        assert result["message"] == "Found 2 historical file(s)."
+
+    def test_current_run_exclusions_apply_across_pages(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        self._seed_files(uploads_dir, 4)
+        # Newest file is excluded as a current-run upload.
+        rt = _runtime(state_uploaded=[{"filename": "file_003.txt", "size": 10, "path": "/mnt/user-data/uploads/file_003.txt"}])
+
+        page1 = _list_uploaded_files_impl(max_results=2, runtime=rt, _paths=_paths(tmp_path))
+        assert [f["filename"] for f in page1["files"]] == ["file_002.txt", "file_001.txt"]
+        assert page1["total_count"] == 3
+        assert "next_cursor" in page1
+
+        page2 = _list_uploaded_files_impl(max_results=2, runtime=rt, _paths=_paths(tmp_path), cursor=page1["next_cursor"])
+        assert [f["filename"] for f in page2["files"]] == ["file_000.txt"]
+        assert "next_cursor" not in page2
+        assert all(f["filename"] != "file_003.txt" for f in page1["files"] + page2["files"])
+
+    def test_cursor_rejected_when_exclusion_set_changes(self, tmp_path):
+        uploads_dir = _uploads_dir(tmp_path)
+        self._seed_files(uploads_dir, 4)
+
+        rt1 = _runtime(state_uploaded=[])
+        page1 = _list_uploaded_files_impl(max_results=2, runtime=rt1, _paths=_paths(tmp_path))
+        assert "next_cursor" in page1
+
+        rt2 = _runtime(state_uploaded=[{"filename": "file_003.txt", "size": 10, "path": "/mnt/user-data/uploads/file_003.txt"}])
+        rejected = _list_uploaded_files_impl(max_results=2, runtime=rt2, _paths=_paths(tmp_path), cursor=page1["next_cursor"])
+        assert rejected["cursor_invalid"] is True

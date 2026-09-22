@@ -138,8 +138,10 @@ To work with these files:
 
 以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
 `list_uploaded_files` 查询历史上传（可选 `query` 按文件名子串过滤、
-`extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。如果已知文件名，也可直接使用
-`read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
+`extensions` 按类型过滤；过滤发生在默认 20 条上限之前）。当匹配项超过一页时，
+响应会带 `next_cursor`；用相同过滤条件再次调用并传入该游标可继续翻页，直到没有下一页。
+游标绑定当前用户/线程与过滤条件，目录内容或上下文变化后会失效并提示重新从第一页开始。
+如果已知文件名，也可直接使用 `read_file` 或 `grep` 访问 `/mnt/user-data/uploads/` 下的文件。
 
 ### 使用上传的文件
 
