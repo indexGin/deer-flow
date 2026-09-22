@@ -101,6 +101,67 @@ def test_resource_graph_tracks_referenced_resource(tmp_path):
     assert "references/guide.md" not in facts["resources"]["orphans"]
 
 
+@pytest.mark.parametrize(
+    ("content", "expected"),
+    [
+        ("[a](b.md)", {"b.md"}),
+        ("![img](a.png)", {"a.png"}),
+        ("[[a](b.md)](c.md)", {"b.md"}),
+        ("[a](one.md][b](two.md)", {"one.md][b](two.md"}),
+        ("![[a]](b.md)", set()),
+        ('see [t](x.md "title")', {"x.md"}),
+        ("][lead](a.md)", {"a.md"}),
+        ("unclosed [foo](bar", set()),
+        ("[a](b.md#c)", {"b.md"}),
+        ("[](empty.md)", {"empty.md"}),
+        ("[x]()", set()),
+        ("pre]mid[post](x.md)", {"x.md"}),
+        ("title with ]( inside [ok](good.md)", {"good.md"}),
+        ("[a](b.md) [broken](also.md", {"b.md"}),
+        ("[nested [inner](i.md)](o.md)", {"i.md"}),
+        ("[" * 4096, set()),
+    ],
+)
+def test_extract_references_matches_markdown_link_shapes(content, expected):
+    from deerflow.skills.review.resource_graph import _extract_references
+
+    assert _extract_references(content) == expected
+
+
+def test_extract_references_is_linear_on_unclosed_brackets():
+    import time
+
+    from deerflow.skills.review.resource_graph import _extract_references
+
+    small = "[" * 8192
+    large = "[" * 65536
+
+    started = time.perf_counter()
+    assert _extract_references(small) == set()
+    small_elapsed = time.perf_counter() - started
+
+    started = time.perf_counter()
+    assert _extract_references(large) == set()
+    large_elapsed = time.perf_counter() - started
+
+    assert large_elapsed < 0.5
+    assert large_elapsed < max(small_elapsed * 16, 0.05)
+
+
+def test_analyze_skill_package_reviews_bracket_heavy_file_quickly(tmp_path):
+    import time
+
+    _write(tmp_path / "SKILL.md", _valid_skill())
+    _write(tmp_path / "references" / "brackets.md", "[" * 65536)
+
+    started = time.perf_counter()
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+    elapsed = time.perf_counter() - started
+
+    assert facts["summary"]["blockers"] == 0
+    assert elapsed < 2.0
+
+
 def test_resource_graph_ignores_eval_fixture_references(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(

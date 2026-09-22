@@ -86,10 +86,29 @@ def build_resource_graph(snapshot: dict[str, Any]) -> tuple[dict[str, Any], list
     return graph, findings
 
 
+def _iter_markdown_link_targets(content: str):
+    # A label cannot cross "]", so for each "](" the opening bracket is the
+    # first "[" after the previous "]". Scanning one candidate per closer keeps
+    # the cost linear instead of retrying the label scan at every "[" (#5714).
+    pos = 0
+    while True:
+        closer = content.find("](", pos)
+        if closer == -1:
+            return
+        previous = content.rfind("]", pos, closer)
+        start = content.find("[", pos if previous == -1 else previous + 1, closer)
+        match = _MARKDOWN_LINK_RE.match(content, start) if start != -1 else None
+        if match is None:
+            pos = closer + 1
+            continue
+        yield match.group(1)
+        pos = match.end()
+
+
 def _extract_references(content: str) -> set[str]:
     refs: set[str] = set()
-    for match in _MARKDOWN_LINK_RE.finditer(content):
-        refs.add(match.group(1).split("#", 1)[0])
+    for target in _iter_markdown_link_targets(content):
+        refs.add(target.split("#", 1)[0])
     for match in _CODE_SPAN_RE.finditer(content):
         token = match.group(1).strip()
         if "/" in token:
