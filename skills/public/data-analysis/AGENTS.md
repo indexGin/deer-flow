@@ -27,3 +27,7 @@ import-failure regressions offline in the root skill tests.
 Markdown exports use the same cell escaping for headers and values. Escape
 backslashes before pipes and normalize CRLF, CR, and LF to inline `<br>` breaks;
 raw newlines must not split one query-result row across Markdown table rows.
+
+JSON exports require exactly unique result column names. Reject duplicates before
+writing the output file; SQL aliases resolve collisions without changing CSV or
+Markdown export semantics.

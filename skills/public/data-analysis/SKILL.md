@@ -95,6 +95,8 @@ Supported output formats (auto-detected from extension):
 - `.json` — JSON array of records
 - `.md` — Markdown table
 
+JSON export requires unique column names. Give duplicate result columns explicit SQL aliases, such as `SELECT a.value AS left_value, b.value AS right_value ...`; otherwise the export fails before writing the output file.
+
 ### Parameters
 
 | Parameter | Required | Description |

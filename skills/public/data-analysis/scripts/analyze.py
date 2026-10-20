@@ -363,6 +363,10 @@ def _export_results(columns: list[str], rows: list[tuple], output_file: str) -> 
             writer.writerows(rows)
 
     elif ext == ".json":
+        if len(columns) != len(set(columns)):
+            raise ValueError(
+                "JSON export requires unique column names; use SQL aliases to distinguish duplicate columns"
+            )
         records = []
         for row in rows:
             record = {}
