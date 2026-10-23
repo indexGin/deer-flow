@@ -95,6 +95,8 @@ Supported output formats (auto-detected from extension):
 - `.json` — JSON array of records
 - `.md` — Markdown table
 
+SQL query failures exit with a nonzero status and report the SQL error and available table columns on stderr. Successful queries, including queries returning zero rows, exit with status zero. A failed query does not overwrite the requested export file.
+
 ### Parameters
 
 | Parameter | Required | Description |

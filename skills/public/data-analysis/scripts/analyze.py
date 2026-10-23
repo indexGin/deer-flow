@@ -291,8 +291,7 @@ def action_query(
             cols = con.execute(f"DESCRIBE {_quote_identifier(tbl)}").fetchall()
             col_names = [c[0] for c in cols]
             error_msg += f'  "{tbl}" ({orig}): {", ".join(col_names)}\n'
-        print(error_msg)
-        return error_msg
+        raise RuntimeError(error_msg) from e
 
     # Format output
     if output_file:

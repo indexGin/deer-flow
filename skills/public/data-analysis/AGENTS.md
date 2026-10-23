@@ -9,10 +9,14 @@ digests, and a namespace version. Directory relocation alone does not change a
 readable input's identity. Bump the namespace if table-mapping semantics change.
 
 Regressions live under the repository's root tests directory. They use
-real DuckDB. Excel and CLI integration additionally run with an already installed
+real DuckDB. Excel and uncached CLI integration additionally run with an already installed
 official spatial extension via `DEERFLOW_TEST_SPATIAL_DIRECTORY`; default tests
 never download that extension. Keep table lookup and persisted-cache checks tied
 to distinct source values, rather than only inspecting generated names.
+
+Query failures must propagate to the CLI as nonzero exits while retaining SQL and
+available-column diagnostics. Cached CLI regressions seed real DuckDB databases
+under an isolated temporary directory; successful empty results remain successful.
 
 Bind file paths and Excel sheet names as SQL values. Quote generated table and
 column identifiers by doubling embedded double quotes. Never rewrite user SQL
